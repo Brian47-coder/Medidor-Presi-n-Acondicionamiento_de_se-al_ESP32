@@ -975,8 +975,7 @@ void pantallaPrincipal() {
 
 
 ///////////////////////////////*****************************///////////////////////////////
-void convertirPresion_a_Bits () {
-}
+//void convertirPresion_a_Bits () { }
 
 
 
@@ -1792,7 +1791,7 @@ void loop() {
             canvas.setTextColor(C_TEXTO);
 
             canvas.drawString("Autores: Estudiantes UNNE", 20, 50, 2);
-            canvas.drawString("Pereson, Brina Nicolas", 20, 80, 2);
+            canvas.drawString("Pereson, Brian Nicolas", 20, 80, 2);
             canvas.drawString("Guillen, Facundo Nicolas", 20, 110, 2);
             canvas.drawString("Version: 1.0 S3-LCD", 20, 140, 2);
             if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 5; delay(250); }
