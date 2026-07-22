@@ -4,7 +4,7 @@
 #include "logo_espressif_2.h" // Aquí está tu imagen de 64x64
 #include "Adafruit_NeoPixel.h"
 #include "colores.h"
-
+#include "qrcode.h"
 
 // --- Configuración de Hardware de la libreria Grafica ---
 TFT_eSPI tft = TFT_eSPI();
@@ -116,7 +116,7 @@ float corrienteActual = 0.0;
 unsigned long ultimamuestra = 0;
 
 // --- Variables de Configuración de datos --- 
-int bitmin = 650, bitmax = 3794,  umbral = 400, resistencia = 148;   // umbral = 400
+int bitmin = 650, bitmax = 4095,  umbral = 400, resistencia = 148;   // umbral = 400
 bool promedio = true, offsetOn = true, valoresNegativos = true;
 // --- Definiciones de media movil ---
 int muestras = 30, intervalo = 100;
@@ -517,7 +517,7 @@ void dibujarMenu(const char* titulo, String opciones[], int total) {
     canvas.fillRoundRect(305, 42 + (seleccion * alturaBarra), 6, alturaBarra, 3, C_ACCENTO);
 }
 
-void modificarValorConfig(int sel, int incremento) {
+void modificarValorConfig(int sel, float incremento) {
     if (sel == 0) bitmin = constrain(bitmin + incremento, 0, 999);
     else if (sel == 1)  bitmax = constrain(bitmax + incremento, 1000, 4095);
     else if (sel == 2) {
@@ -528,15 +528,15 @@ void modificarValorConfig(int sel, int incremento) {
         for(int i=0; i<MAX_MUESTRAS; i++) buffer[i] = 0;
     }
     else if (sel == 3) intervalo = constrain(intervalo + incremento, 1, 100000);
-    else if (sel == 4) umbral = constrain(umbral + incremento, 1, MAX_MUESTRAS);
+    else if (sel == 4) umbral = constrain(umbral + incremento, 1, 600);
     else if (sel == 5) resistencia = constrain(resistencia + incremento, 1, 300);
     else if (sel == 11) factorGanancia = constrain(factorGanancia + incremento, 1.0, 10.0);
-    else if (sel == 12) factorOffset = constrain(factorOffset + incremento, 0, 1000);
+    else if (sel == 12) factorOffset = constrain(factorOffset + incremento, 0, 1000.0);
 }
 
 void configurarPuntosTeoricos();
 
-void modificarValorMenuCal(int sel, int incremento) {
+void modificarValorMenuCal(int sel, float incremento) {
     if (sel == 1) factorOffset = constrain(factorOffset + incremento, 0, 1000);
     else if (sel == 3) factorGanancia = constrain(factorGanancia + incremento, 1.0, 10.0);
     else if (sel == 5) {
@@ -1449,6 +1449,50 @@ void habilitarGanancia() {
 
 
 
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+void mostrarQR_Repo() {
+    // Es CRÍTICO que el fondo del QR sea blanco para que la cámara del celular lo lea bien
+    canvas.fillSprite(TFT_WHITE); 
+    
+    QRCode qrcode;
+    // Version 6 soporta hasta 106 caracteres. Nivel de corrección 0 (Low).
+    uint8_t qrcodeData[qrcode_getBufferSize(6)];
+    String url = "https://github.com/Brian47-coder/Medidor-Presi-n-Acondicionamiento_de_se-al_ESP32/blob/main/README.md";
+    
+    qrcode_initText(&qrcode, qrcodeData, 6, 0, url.c_str());
+
+    // La versión 6 del QR tiene una matriz de 41x41 módulos.
+    // Vamos a escalar cada módulo a 4x4 píxeles (Tamaño final: 164x164 px)
+    int scale = 4; 
+    
+    // Centrar el QR en la pantalla dinámicamente
+    int offsetX = (canvas.width() - (qrcode.size * scale)) / 2;
+    int offsetY = (canvas.height() - (qrcode.size * scale)) / 2 - 6; // Un poco más arriba para poner texto abajo
+
+    // Dibujar los cuadraditos del QR
+    for (uint8_t y = 0; y < qrcode.size; y++) {
+        for (uint8_t x = 0; x < qrcode.size; x++) {
+            if (qrcode_getModule(&qrcode, x, y)) {
+                // Si hay dato, dibujamos un cuadrado negro
+                canvas.fillRect(offsetX + (x * scale), offsetY + (y * scale), scale, scale, TFT_BLACK);
+            }
+        }
+    }
+
+    // Añadir un texto descriptivo abajo del QR
+    canvas.setTextColor(TFT_BLACK, TFT_WHITE);
+    // 2. CONFIGURACIÓN CLAVE: Cambiamos el ancla al Centro-Superior (Top Center)
+    canvas.setTextDatum(TC_DATUM);
+    canvas.drawString("Escanear para Ayuda, Presione BACK para salir", canvas.width() / 2, canvas.height() - 10, 1);
+    // 4. Volvemos a dejar el Datum como estaba por defecto (Top Left) 
+    // para no desarmar el resto de tus menús que asumen que el texto se dibuja desde la izquierda.
+    canvas.setTextDatum(TL_DATUM);
+
+}
+//////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+
 
 
 void loop() {
@@ -1567,6 +1611,7 @@ void loop() {
                 "Umbral: " + String(umbral),
                 "Resistencia: " + String(resistencia) + " Ohm", 
                 "Zona Muerta: " + String(zonaMuerta?"ON":"OFF"), 
+                
                 "Uso Offset: " + String(offsetOn?"ON":"OFF"), 
                 "Promedio: " + String(promedio?"ON":"OFF"),
                 "Valores Negativos: " + String(valoresNegativos?"ON":"OFF"), 
@@ -1595,18 +1640,42 @@ void loop() {
                     delay(250);
                 }
             } else {
-                // Modo Edición (Cambiar valores de 1 en 1 o 10 en 10)
+                // Modo Edición (Cambiar valores dinámicamente)
                 if (digitalRead(PIN_BT_UP) == LOW) {
                     if (tPresionado == 0) tPresionado = millis();
-                    int inc = (millis() - tPresionado > 600) ? 10 : 1; // Si pasa 600ms, sube de a 10
+                    unsigned long tiempoMantenido = millis() - tPresionado;
+                    
+                    float inc = 1.0; // Por defecto
+                    
+                    // Si editamos Factor Ganancia (11) o Factor Offset (12)
+                    if (seleccion == 11 || seleccion == 12) {
+                        if (tiempoMantenido > 2000) inc = 1.00;      // +2 seg: Unidades
+                        else if (tiempoMantenido > 800) inc = 0.10;  // +0.8 seg: Décimas
+                        else inc = 0.01;                             // Toque: Centésimas
+                    } else {
+                        // Lógica para variables enteras (muestras, bitmin, etc)
+                        inc = (tiempoMantenido > 600) ? 10.0 : 1.0;
+                    }
+
                     modificarValorConfig(seleccion, inc);
-                    delay((inc == 10) ? 80 : 200); // Rápido si mantiene, normal si toca una vez
+                    delay((tiempoMantenido > 600) ? 80 : 200); // Acelera la repetición
                 } 
                 else if (digitalRead(PIN_BT_DOWN) == LOW) {
                     if (tPresionado == 0) tPresionado = millis();
-                    int inc = (millis() - tPresionado > 600) ? 10 : 1;
-                    modificarValorConfig(seleccion, -inc);
-                    delay((inc == 10) ? 80 : 200);
+                    unsigned long tiempoMantenido = millis() - tPresionado;
+                    
+                    float inc = 1.0;
+                    
+                    if (seleccion == 11 || seleccion == 12) {
+                        if (tiempoMantenido > 2000) inc = 1.00;
+                        else if (tiempoMantenido > 800) inc = 0.10;
+                        else inc = 0.01;
+                    } else {
+                        inc = (tiempoMantenido > 600) ? 10.0 : 1.0;
+                    }
+
+                    modificarValorConfig(seleccion, -inc); // Fíjate en el signo negativo
+                    delay((tiempoMantenido > 600) ? 80 : 200);
                 } 
                 else {
                     tPresionado = 0; // Se soltó el botón
@@ -1819,30 +1888,50 @@ void loop() {
                         }
                         if (digitalRead(PIN_BT_BACK) == LOW) { estCalib = CAL_MIDIENDO; editando_cal = false; delay(200); }
 
-                    }else if (editando_cal) {
-                        // Modo Edición (Cambiar valores de 1 en 1 o 10 en 10)
+                    } else if (editando_cal) {
+                        // Modo Edición en Calibración
                         if (digitalRead(PIN_BT_UP) == LOW) {
                             if (tPresionado_cal == 0) tPresionado_cal = millis();
-                            int inc = (millis() - tPresionado_cal > 600) ? 10 : 1; // Si pasa 600ms, sube de a 10
+                            unsigned long tiempoMantenido = millis() - tPresionado_cal;
+                            
+                            float inc = 1.0;
+                            
+                            // Ajusta estos números (1, 3, 5) a los índices de tus variables float en este submenú
+                            if (cal_menu_sel == 1 || cal_menu_sel == 3) {
+                                if (tiempoMantenido > 2000) inc = 1.00;
+                                else if (tiempoMantenido > 800) inc = 0.10;
+                                else inc = 0.01;
+                            } else {
+                                inc = (tiempoMantenido > 600) ? 10.0 : 1.0;
+                            }
+
                             modificarValorMenuCal(cal_menu_sel, inc);
-                            delay((inc == 10) ? 80 : 200); // Rápido si mantiene, normal si toca una vez
+                            delay((tiempoMantenido > 600) ? 80 : 200);
                         } 
                         else if (digitalRead(PIN_BT_DOWN) == LOW) {
                             if (tPresionado_cal == 0) tPresionado_cal = millis();
-                            int inc = (millis() - tPresionado_cal > 600) ? 10 : 1;
+                            unsigned long tiempoMantenido = millis() - tPresionado_cal;
+                            
+                            float inc = 1.0;
+                            
+                            if (cal_menu_sel == 1 || cal_menu_sel == 3 || cal_menu_sel == 5) {
+                                if (tiempoMantenido > 2000) inc = 1.00;
+                                else if (tiempoMantenido > 800) inc = 0.10;
+                                else inc = 0.01;
+                            } else {
+                                inc = (tiempoMantenido > 600) ? 10.0 : 1.0;
+                            }
+
                             modificarValorMenuCal(cal_menu_sel, -inc);
-                            delay((inc == 10) ? 80 : 200);
+                            delay((tiempoMantenido > 600) ? 80 : 200);
                         } 
                         else {
-                            tPresionado_cal = 0; // Se soltó el botón
+                            tPresionado_cal = 0; 
                         }
                         
                         if (digitalRead(PIN_BT_MENU) == LOW || digitalRead(PIN_BT_BACK) == LOW) {
                             editando_cal = false; tPresionado_cal = 0; delay(200);
                         }
-                    }
-                    else {
-                        if (digitalRead(PIN_BT_BACK) == LOW) { estCalib = CAL_MIDIENDO; editando_cal = false; delay(200); }
                     }
                     break;
                 }
@@ -1904,9 +1993,9 @@ void loop() {
             dibujarHeader("AYUDA");
             canvas.setTextColor(C_TEXTO);
             
-            canvas.drawString("Instrucciones de uso", 20, 50, 2);
-            canvas.drawString("Presione MENU para entrar", 20, 80, 2);
-            canvas.drawString("en modo edición", 20, 110, 2);
+            canvas.drawString("Instrucciones de uso al escanear el QR", 20, 10, 2);
+            mostrarQR_Repo();
+   
             if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 7; delay(250); }
             break;
         }
