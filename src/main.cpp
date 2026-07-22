@@ -79,6 +79,7 @@ uint16_t C_FONDO, C_TEXTO, C_ACCENTO, C_RECUADRO, C_EDIT, C_ESCALA, C_SUBMENU, C
 
 bool modoMonitorActivo = false; // Controla si transmitimos por USB a la PC
 
+bool sensorDesconectado = false; // Para que el menu de Calibracion no muestre valores de presion cuando el sensor esta desconectado.
 
 
 // --- Definiciones para el Sensor ---
@@ -116,7 +117,7 @@ float corrienteActual = 0.0;
 unsigned long ultimamuestra = 0;
 
 // --- Variables de Configuración de datos --- 
-int bitmin = 650, bitmax = 4095,  umbral = 400, resistencia = 148;   // umbral = 400
+int bitmin = 650, bitmax = 4095,  umbral = 400, resistencia = 148;  
 bool promedio = true, offsetOn = true, valoresNegativos = true;
 // --- Definiciones de media movil ---
 int muestras = 30, intervalo = 100;
@@ -197,7 +198,7 @@ unsigned long tPresionado_cal = 0; // Para la aceleración del botón de 1 a 10
 ///////////////////////////
 //////////////////////////
 bool ganancia = false;
-float factorGanancia = 1.22; 
+float factorGanancia = 1.0; 
 float factorOffset = 0.0;
 
 float factorGanancia_sinconfirmar = 0.0;
@@ -530,7 +531,7 @@ void modificarValorConfig(int sel, float incremento) {
     else if (sel == 3) intervalo = constrain(intervalo + incremento, 1, 100000);
     else if (sel == 4) umbral = constrain(umbral + incremento, 1, 600);
     else if (sel == 5) resistencia = constrain(resistencia + incremento, 1, 300);
-    else if (sel == 11) factorGanancia = constrain(factorGanancia + incremento, 1.0, 10.0);
+    else if (sel == 10) factorGanancia = constrain(factorGanancia + incremento, 1.0, 10.0);
     else if (sel == 12) factorOffset = constrain(factorOffset + incremento, 0, 1000.0);
 }
 
@@ -1002,11 +1003,6 @@ void pantallaPrincipal() {
 
 
 ///////////////////////////////*****************************///////////////////////////////
-//void convertirPresion_a_Bits () { }
-
-
-
-
 // --- Función Matemática de Regresión Lineal para Calibración ---
 void calcularGanancia() {
     r_sumX = 0; r_sumY = 0; r_sumXY = 0; r_sumX2 = 0;
@@ -1126,15 +1122,20 @@ void pantallaCalibracion() {
         float py = (float)cy + (float)h - (presionGuardada / maxEscala) * h;
         canvas.fillCircle((int)px, constrain((int)py, (int)cy, (int)cy+(int)h), 2, TFT_YELLOW);
     }
-
+    
     // 2. Panel Lateral Derecho (Lectura en vivo)
     canvas.setTextColor(TFT_YELLOW);
     canvas.drawString("PRESION", 210 +20 +2, cy, 1);
-    canvas.setTextColor(C_TEXTO);
-    canvas.drawString(String(p_medida, 2), 210 +20, cy + 15, 4); // Letra grande
+    if (sensorDesconectado){
+        canvas.setTextColor(TFT_RED); 
+        canvas.drawString("-- --",  210 +20, cy + 15, 4);
+    } else{
+        canvas.setTextColor(C_TEXTO);
+        canvas.drawString(String(p_medida, 2), 210 +20, cy + 15, 4); // Letra grande
+    }
     canvas.setTextColor(TFT_YELLOW);
     canvas.drawString(unidad, 210 +20+10+5, cy + 40, 2);
-
+    
     // 3. Barra de Avance y Estado Inferior
     canvas.setTextColor(C_ESCALA);
     canvas.drawString(modoAscenso ? "Modo: ASCENSO" : "Modo: DESCENSO", 10 + 5, cy + h + 15 + 4, 1);
@@ -1509,6 +1510,14 @@ void loop() {
 
 
     habilitarGanancia();
+
+    // Si la corriente cae por debajo de un umbral crítico (ej. 3.0 mA), el lazo está abierto.
+    // También puedes usar: if (valorADC_crudo < (bitmin * 0.5))
+    if (valorADC_crudo < (bitmin * 0.5)){
+        sensorDesconectado = true;
+    } else {
+        sensorDesconectado = false;
+    }
     
     if (modoMonitorActivo) {
         // Mandamos los datos separados por comas: presion, corriente, bits
@@ -1611,12 +1620,11 @@ void loop() {
                 "Umbral: " + String(umbral),
                 "Resistencia: " + String(resistencia) + " Ohm", 
                 "Zona Muerta: " + String(zonaMuerta?"ON":"OFF"), 
-                
-                "Uso Offset: " + String(offsetOn?"ON":"OFF"), 
                 "Promedio: " + String(promedio?"ON":"OFF"),
                 "Valores Negativos: " + String(valoresNegativos?"ON":"OFF"), 
                 "Uso Ganancia: " + String(ganancia?"ON":"OFF"),
                 "Factor Ganancia: " + String(factorGanancia, 2),
+                "Uso Offset: " + String(offsetOn?"ON":"OFF"), 
                 "Factor Offset " + String(factorOffset, 2),
                 "Back"
             };
@@ -1631,11 +1639,13 @@ void loop() {
                 if (digitalRead(PIN_BT_MENU) == LOW) {
                     if (seleccion <= 5) editando = true; // Entra a modo edición para números
                     else if (seleccion == 6) zonaMuerta = !zonaMuerta; // Toggles directos
-                    else if (seleccion == 7) offsetOn = !offsetOn;
-                    else if (seleccion == 8) promedio = !promedio;
-                    else if (seleccion == 9) valoresNegativos = !valoresNegativos;
-                    else if (seleccion == 10) ganancia = !ganancia;
-                    else if (seleccion >= 11 && seleccion <= 12) editando = true; // este && hace :  
+                    
+                    else if (seleccion == 7) promedio = !promedio;
+                    else if (seleccion == 8) valoresNegativos = !valoresNegativos;
+                    else if (seleccion == 9) ganancia = !ganancia;
+                    else if (seleccion == 10) editando = true; // Factor Ganancia editable
+                    else if (seleccion == 11) offsetOn = !offsetOn;
+                    else if (seleccion == 12) editando = true; // este && hace :  
                     else if (seleccion == 13) { estadoActual = MENU_RAIZ; seleccion = 1; offsetScroll = 0; }
                     delay(250);
                 }
@@ -1647,8 +1657,8 @@ void loop() {
                     
                     float inc = 1.0; // Por defecto
                     
-                    // Si editamos Factor Ganancia (11) o Factor Offset (12)
-                    if (seleccion == 11 || seleccion == 12) {
+                    // Si editamos Factor Ganancia (10) o Factor Offset (12)
+                    if (seleccion == 10 || seleccion == 12) {
                         if (tiempoMantenido > 2000) inc = 1.00;      // +2 seg: Unidades
                         else if (tiempoMantenido > 800) inc = 0.10;  // +0.8 seg: Décimas
                         else inc = 0.01;                             // Toque: Centésimas
@@ -1666,7 +1676,7 @@ void loop() {
                     
                     float inc = 1.0;
                     
-                    if (seleccion == 11 || seleccion == 12) {
+                    if (seleccion == 10 || seleccion == 12) {
                         if (tiempoMantenido > 2000) inc = 1.00;
                         else if (tiempoMantenido > 800) inc = 0.10;
                         else inc = 0.01;
@@ -1779,22 +1789,24 @@ void loop() {
 
                     // 2. Capturar (MENU)
                     if (digitalRead(PIN_BT_MENU) == LOW) {
-                        if (cal_punto_actual < cal_cantidad_puntos){
-                            p_capturada_temp = getPresionConvertida(); // "Congela" el valor para el popup
-                            p_capturada_temp_bar = presionActual;
-                            estCalib = CAL_CONFIRMAR;
-                            cal_seleccion = 0; // Cursor en "Aceptar"
-                            delay(300);
-                        }
-                        else {
+                        if(!sensorDesconectado){
+                            if (cal_punto_actual < cal_cantidad_puntos){
+                                p_capturada_temp = getPresionConvertida(); // "Congela" el valor para el popup
+                                p_capturada_temp_bar = presionActual;
+                                estCalib = CAL_CONFIRMAR;
+                                cal_seleccion = 0; // Cursor en "Aceptar"
+                                delay(300);
+                            }
+                            else {
 
-                            mostrarRegresionCorregida = true; // Activa la línea magenta
-                            mostrarRegresion = true; // Activa la línea magenta
-                            calcularGanancia();
-                            pantallaCalibracion(); 
-                            estCalib = CAL_RESULTADO;
-                            cal_seleccion = 0; // esto hace que el cuadro este en aceptar primero
-                            delay(300); 
+                                mostrarRegresionCorregida = true; // Activa la línea magenta
+                                mostrarRegresion = true; // Activa la línea magenta
+                                calcularGanancia();
+                                pantallaCalibracion(); 
+                                estCalib = CAL_RESULTADO;
+                                cal_seleccion = 0; // esto hace que el cuadro este en aceptar primero
+                                delay(300); 
+                            }
                         }
                     }
                     // 3. Salir al Menú (BACK)
