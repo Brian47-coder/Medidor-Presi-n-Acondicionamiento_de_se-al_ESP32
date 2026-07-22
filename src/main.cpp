@@ -53,7 +53,7 @@ Adafruit_NeoPixel ledRGB(NUM_PIXELS, PIN_RETROILUM, NEO_GRB + NEO_KHZ800);
 //////////////////////////////////////////
 //////////////////////////////////////////
 // --- Estados y Navegación ---
-enum Estados { PRINCIPAL, MENU_RAIZ, CONF_PANTALLA, CONF_DATOS, UNIDADES, VISUAL, CALIBRACION, INFO, AYUDA };
+enum Estados { PRINCIPAL, MENU_RAIZ, CONF_PANTALLA, CONF_DATOS, UNIDADES, VISUAL, MONITOR, CALIBRACION, INFO, AYUDA };
 Estados estadoActual = PRINCIPAL;
 
 enum ModoVisual { V_ANALOGICO, V_DIGITAL, V_PARAMETROS, V_GRAFICADORA };
@@ -77,7 +77,7 @@ uint16_t C_FONDO, C_TEXTO, C_ACCENTO, C_RECUADRO, C_EDIT, C_ESCALA, C_SUBMENU, C
 //////////////////////////////////////////
 
 
-
+bool modoMonitorActivo = false; // Controla si transmitimos por USB a la PC
 
 
 
@@ -109,6 +109,7 @@ bool    buflleno  = false;          // Indica si el buffer ya se llenó al menos
 //////////////////////////////////////////
 // --- Variables de Medición ---
 int valorADC_prom;
+int valorADC_crudo;
 int valorADC_crudo_prom;
 float presionActual = 0.0;
 float corrienteActual = 0.0;
@@ -171,8 +172,11 @@ unsigned long tPresionado_osc = 0; // Para la aceleración del botón de 1 a 10
 ////////////////////////////////////////
 ////////////////////////////////////////
 // --- Variables Globales para calibracion ---
-float cal_teoricos[8] = {0.0, 14.28, 28.57, 42.85, 57.14, 71.43, 85.71, 100.0}; // % de la escala
-float cal_medidos[8];
+const int CAL_MIN_PUNTOS = 2;
+const int CAL_MAX_PUNTOS = 8;
+float cal_teoricos[CAL_MAX_PUNTOS] = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0};
+float cal_medidos[CAL_MAX_PUNTOS];
+int cal_cantidad_puntos = CAL_MIN_PUNTOS;
 int cal_punto_actual = 0;
 int cal_seleccion = 0;
 int cal_seleccion_sub = 0;
@@ -209,6 +213,7 @@ float factorOffset_sinconfirmar =0.0;
 float r_sumX = 0, r_sumY = 0, r_sumXY = 0, r_sumX2 = 0; // Para la tabla
 float r_m = 1.0, r_b = 0.0;                             // Resultados temporales
 float p_capturada_temp = 0.0;                           // Presión en el instante del OK
+float p_capturada_temp_bar = 0.0;                       // Presión capturada en bar para guardar el punto
 bool mostrarRegresion = false;                          // Bandera para graficar la nueva recta
 bool mostrarRegresionCorregida = false;  
 bool modoAscenso = true;                                // Control de dirección
@@ -437,6 +442,17 @@ float getPresionConvertida() {
     } return presionActual;
 }
 
+float convertirPresionDesdeBar(float presionBar) {
+    switch(unidadActual) {
+        case U_BAR: return presionBar;
+        case U_PSI: return presionBar * 14.5038;
+        case U_PA:  return presionBar * 100000.0;
+        case U_KGF: return presionBar * 1.01972;
+        case U_MCA: return presionBar * 10.197;
+        case U_ATM: return presionBar * 0.986923;
+    } return presionBar;
+}
+
 float getMaxEscala() {
     switch(unidadActual) {
         case U_BAR: return 10.0;
@@ -518,10 +534,21 @@ void modificarValorConfig(int sel, int incremento) {
     else if (sel == 12) factorOffset = constrain(factorOffset + incremento, 0, 1000);
 }
 
+void configurarPuntosTeoricos();
+
 void modificarValorMenuCal(int sel, int incremento) {
     if (sel == 1) factorOffset = constrain(factorOffset + incremento, 0, 1000);
     else if (sel == 3) factorGanancia = constrain(factorGanancia + incremento, 1.0, 10.0);
-
+    else if (sel == 5) {
+        int nuevaCantidad = constrain(cal_cantidad_puntos + incremento, CAL_MIN_PUNTOS, CAL_MAX_PUNTOS);
+        if (nuevaCantidad != cal_cantidad_puntos) {
+            cal_cantidad_puntos = nuevaCantidad;
+            cal_punto_actual = 0;
+            mostrarRegresion = false;
+            mostrarRegresionCorregida = false;
+            configurarPuntosTeoricos();
+        }
+    }
 }
 
 void dibujarBarraParametro(int y, String titulo, String valor, float porcentaje) {
@@ -700,7 +727,7 @@ void pantallaPrincipal() {
     canvas.drawRect(5, 5, 35, 25, C_ACCENTO);
     canvas.setTextColor(C_ACCENTO);
     canvas.drawString("MENU", 10, 14, 1);
-    if (offsetOn && offsetBits != 0) 
+    if (offsetOn) 
         canvas.fillCircle(300, 15, 5, TFT_ORANGE);
     if (ganancia) 
         canvas.fillCircle(275, 15, 5, TFT_ORANGE);
@@ -852,7 +879,7 @@ void pantallaPrincipal() {
             // 2. Dibujar el arco de fondo decorativo
             canvas.drawArc(cx, cy, 105, 103, 90, 270, C_RECUADRO, C_FONDO);
 
-            // 3. Lógica de la Aguja Futurista
+            // 3. Lógica de la Aguja 
             float pSegura = constrain(getPresionConvertida(), 0.0, maxVal);
             float anguloAguja = 180.0 - ((pSegura / maxVal) * 180.0);  // se tiene que ver como se comporta
             float radAg = anguloAguja * PI / 180.0;
@@ -983,14 +1010,11 @@ void pantallaPrincipal() {
 // --- Función Matemática de Regresión Lineal para Calibración ---
 void calcularGanancia() {
     r_sumX = 0; r_sumY = 0; r_sumXY = 0; r_sumX2 = 0;
-    int n = 8;
+    int n = cal_cantidad_puntos;
     
     for(int i = 0; i < n; i++) {
         float x = cal_teoricos[i]; // El valor que "debería" ser
-
-        // Transformamos los bits crudos medidos a presión real "sin calibrar" para la regresión
-        float corriente = (float)map(cal_medidos[i], bitmin, bitmax, 400, 2000) / 100.0;
-        float y = (corriente - 4.0) * (10.0 / 16.0); // Tu cálculo estándar
+        float y = cal_medidos[i]; // Presión guardada al aceptar cada punto
 
         r_sumX += x;
         r_sumY += y;
@@ -999,7 +1023,14 @@ void calcularGanancia() {
     }
     
     // Cálculos de regresión guardados en variables globales temporales
-    r_m = (n * r_sumXY - r_sumX * r_sumY) / (n * r_sumX2 - r_sumX * r_sumX);
+    float denominador = (n * r_sumX2 - r_sumX * r_sumX);
+    if (abs(denominador) < 0.001) {
+        r_m = 0.0;
+        r_b = 0.0;
+        return;
+    }
+
+    r_m = (n * r_sumXY - r_sumX * r_sumY) / denominador;
     r_b = (r_sumY - r_m * r_sumX) / n;
 
     // Cálculo de los parámetros para "forzar" la teórica
@@ -1055,16 +1086,12 @@ void pantallaCalibracion() {
     int py_max = cy; 
     canvas.drawLine(cx, cy + h, px_max, py_max, C_ESCALA); 
 
-    // Puntos Rojos Teóricos (Cada 1 unidad, de 0 a 7)
-    for(int i = 0; i <= 10; i++) {
-        // Factor de progreso mas exacto
-        float porcentaje = (float)i / 10.0;
-
-        float rx = (float)cx + ( porcentaje * (float)w);
+    // Puntos Rojos Teóricos
+    for(int i = 0; i < cal_cantidad_puntos; i++) {
+        float porcentaje = cal_teoricos[i] / 10.0;
+        float rx = (float)cx + (porcentaje * (float)w);
         float ry = (float)cy + (float)h - (porcentaje * (float)h);
-        if (i<=7) {
         canvas.fillCircle((int)rx, (int)ry, 2, TFT_RED);
-        }
     }
 
     // Recta de Regresión Calculada (Se dibuja solo al confirmar)
@@ -1091,11 +1118,12 @@ void pantallaCalibracion() {
 
 
     // Dibujar los puntos Amarillos Medidos
-    for(int i = 0; i < cal_punto_actual; i++) {
+    for(int i = 0; i < cal_punto_actual && i < cal_cantidad_puntos; i++) {
         float x_med = cal_teoricos[i];
         float px = (float)cx + (x_med / 10.0) * (float)w;
-        
-        float py = (float)cy + (float)h - (p_medida / maxEscala) * h;
+
+        float presionGuardada = convertirPresionDesdeBar(cal_medidos[i]);
+        float py = (float)cy + (float)h - (presionGuardada / maxEscala) * h;
         canvas.fillCircle((int)px, constrain((int)py, (int)cy, (int)cy+(int)h), 2, TFT_YELLOW);
     }
 
@@ -1110,13 +1138,14 @@ void pantallaCalibracion() {
     // 3. Barra de Avance y Estado Inferior
     canvas.setTextColor(C_ESCALA);
     canvas.drawString(modoAscenso ? "Modo: ASCENSO" : "Modo: DESCENSO", 10 + 5, cy + h + 15 + 4, 1);
-    canvas.drawString("Punto " + String(constrain(cal_punto_actual, 0, 8)) + "/8: " + String(cal_teoricos[constrain(cal_punto_actual, 0, 7)]/10.0 * maxEscala, 1) + unidad, 180, cy + h + 15+4, 1);
+    int indicePunto = constrain(cal_punto_actual, 0, cal_cantidad_puntos - 1);
+    canvas.drawString("Punto " + String(constrain(cal_punto_actual + 1, 1, cal_cantidad_puntos)) + "/" + String(cal_cantidad_puntos) + ": " + String(cal_teoricos[indicePunto]/10.0 * maxEscala, 1) + unidad, 180, cy + h + 15+4, 1);
 
 
     // 2. Barra de Avance
     canvas.drawString("Progreso:", 4+ 10+1, 165-1-5, 1);
     canvas.drawRect(80, 165-5, 160, 10, C_RECUADRO);
-    float progreso = ((float)constrain(cal_punto_actual-1, 0, 7)/ 7.0 ) * 156.0;
+    float progreso = ((float)constrain(cal_punto_actual, 0, cal_cantidad_puntos) / (float)cal_cantidad_puntos) * 156.0;
     canvas.fillRect(82, 167-5, progreso, 6, TFT_GREEN);
 
 
@@ -1180,8 +1209,8 @@ void pantallaCalibracion() {
 
         int mx = cx + ANCHO_OSC - 90;
         int my = cy + 10;
-        canvas.fillRoundRect(mx, my, 105+4, 80+2, 3, TFT_DARKGREY);
-        canvas.drawRoundRect(mx, my, 105+4, 80+2, 3, C_TEXTO);
+        canvas.fillRoundRect(mx, my, 105+4, 95+2, 3, TFT_DARKGREY);
+        canvas.drawRoundRect(mx, my, 105+4, 95+2, 3, C_TEXTO);
 
         // 3. Variables para el espaciado dinámico de renglones
         int pos_y = 5;       // Posición Y de inicio
@@ -1215,12 +1244,15 @@ void pantallaCalibracion() {
 
         canvas.setTextColor(C_TEXTO);
         canvas.drawString(cal_menu_sel == 4 ? "> Regre. Med: " + String(mostrarRegresion ? "ON" : "OFF") : "  Regre. Med: " + String(mostrarRegresion ? "ON" : "OFF"), mx + 5, my + pos_y, 1); pos_y += espaciado;
+
+        canvas.setTextColor((cal_menu_sel == 5 && editando_cal) ? C_EDIT : C_TEXTO);
+        canvas.drawString(cal_menu_sel == 5 ? "> Puntos: " + String(cal_cantidad_puntos) : "  Puntos: " + String(cal_cantidad_puntos), mx + 5, my + pos_y, 1); pos_y += espaciado;
         
         // === SECCIÓN 3: SALIDA ===
         
         // Índice 9: Salir
         canvas.setTextColor(C_TEXTO);
-        canvas.drawString(cal_menu_sel == 5 ? "> Salir" : "  Salir", mx + 5, my + pos_y, 1);
+        canvas.drawString(cal_menu_sel == 6 ? "> Salir" : "  Salir", mx + 5, my + pos_y, 1);
 
     }
     else if (estCalib == CAL_SUBMENU) {
@@ -1273,12 +1305,11 @@ void pantallaCalibracion() {
 
 // --- Función de ayuda para resetear puntos ---
 void configurarPuntosTeoricos() {
-    if (modoAscenso) {
-        float valores[] = {0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0};
-        for(int i=0; i<8; i++) cal_teoricos[i] = valores[i];
-    } else {
-        float valores[] = {7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0};
-        for(int i=0; i<8; i++) cal_teoricos[i] = valores[i];
+    float paso = (cal_cantidad_puntos > 1) ? 7.0 / (float)(cal_cantidad_puntos - 1) : 0.0;
+
+    for(int i=0; i<CAL_MAX_PUNTOS; i++) {
+        float valor = (i < cal_cantidad_puntos) ? paso * (float)i : 0.0;
+        cal_teoricos[i] = modoAscenso ? valor : 7.0 - valor;
     }
 }
 
@@ -1305,7 +1336,7 @@ void calcularPromedio() {
             ultimamuestra = ahora;
             
             // 2. LECTURA Y CALIBRACIÓN POR BOTÓN
-            int valorADC_crudo = analogRead(PIN_BT_SENSOR);
+            valorADC_crudo = analogRead(PIN_BT_SENSOR);
     
             buffer[bufindex] = valorADC_crudo;                              // Guardamos la muestra actual en el buffer circular
             bufindex++;                         
@@ -1338,7 +1369,7 @@ void calcularPromedio() {
             ultimamuestra = ahora;
             
             // 2. LECTURA Y CALIBRACIÓN POR BOTÓN
-            int valorADC_crudo = analogRead(PIN_BT_SENSOR);
+            valorADC_crudo = analogRead(PIN_BT_SENSOR);
             valorADC_crudo_prom = valorADC_crudo;
     
         }
@@ -1434,6 +1465,19 @@ void loop() {
 
 
     habilitarGanancia();
+    
+    if (modoMonitorActivo) {
+        // Mandamos los datos separados por comas: presion, corriente, bits
+        // Al usar Serial.print y terminar con Serial.println, Python sabe dónde termina la línea
+        Serial.print(presionActual);
+        Serial.print(",");
+        Serial.print(corrienteActual);
+        Serial.print(",");
+        Serial.println(valorADC_crudo);
+        
+        // Un pequeño delay para no colgar el puerto USB (muestreo a 10Hz)
+        delay(100); 
+    }
 
 
     switch (estadoActual) {
@@ -1450,26 +1494,27 @@ void loop() {
         }
 
         case MENU_RAIZ: {
-            String raiz[] = {"Config. Pantalla", "Config. Datos", "Unidades", "Visual", "Calibracion", "Informacion", "Ayuda"};
-            dibujarMenu("MENU PRINCIPAL", raiz, 7);
-            if (digitalRead(PIN_BT_UP) == LOW) { seleccion = (seleccion <= 0) ? 6 : seleccion - 1; delay(200); }
-            if (digitalRead(PIN_BT_DOWN) == LOW) { seleccion = (seleccion >= 6) ? 0 : seleccion + 1; delay(200); }
+            String raiz[] = {"Config. Pantalla", "Config. Datos", "Unidades", "Visual", "Monitor", "Calibracion", "Informacion", "Ayuda"};
+            dibujarMenu("MENU PRINCIPAL", raiz, 8);
+            if (digitalRead(PIN_BT_UP) == LOW) { seleccion = (seleccion <= 0) ? 7 : seleccion - 1; delay(200); }
+            if (digitalRead(PIN_BT_DOWN) == LOW) { seleccion = (seleccion >= 7) ? 0 : seleccion + 1; delay(200); }
             if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = PRINCIPAL; delay(250); }
             if (digitalRead(PIN_BT_MENU) == LOW) {
                 if (seleccion == 0) estadoActual = CONF_PANTALLA;
                 if (seleccion == 1) estadoActual = CONF_DATOS;
                 if (seleccion == 2) estadoActual = UNIDADES;
                 if (seleccion == 3) estadoActual = VISUAL;
+                if (seleccion == 4) estadoActual = MONITOR;
                // --- BLOQUE DE CALIBRACION ACTUALIZADO ---
-                if (seleccion == 4) { 
+                if (seleccion == 5) { 
                     estadoActual = CALIBRACION;
                     estCalib = CAL_MIDIENDO;    // Reset del sub-estado
                     cal_punto_actual = 0;       // Empezar desde el punto 1
                     mostrarRegresion = false;   // Borrar línea magenta previa
                     configurarPuntosTeoricos(); // Cargar los valores (1.0, 2.0, etc.)
                 }
-                if (seleccion == 5) estadoActual = INFO;
-                if (seleccion == 6) estadoActual = AYUDA;
+                if (seleccion == 6) estadoActual = INFO;
+                if (seleccion == 7) estadoActual = AYUDA;
                 seleccion = 0; offsetScroll = 0; delay(250);
             }
             break;
@@ -1589,6 +1634,60 @@ void loop() {
             break;
         }
 
+        case MONITOR: {
+            dibujarHeader("MONITOR SERIAL");
+            
+            // --- Lógica de animación del Switch ---
+            // Usamos 'static' para que recuerde su posición entre ciclos del loop
+            static int posKnobX = 35; // Posición X inicial del botón (OFF)
+            int targetX = modoMonitorActivo ? 65 : 35; // Hacia dónde debe ir
+            
+            // Interpolar la posición (suavizado del movimiento)
+            if (posKnobX < targetX) posKnobX += 4; // Velocidad de ida
+            if (posKnobX > targetX) posKnobX -= 4; // Velocidad de vuelta
+
+            // Determinar color de fondo del switch
+            uint16_t colorFondoSwitch = modoMonitorActivo ? TFT_GREEN : TFT_DARKGREY;
+            
+            // 1. Dibujar fondo del switch (cápsula redondeada)
+            canvas.fillRoundRect(20, 60, 60, 30, 15, colorFondoSwitch);
+            
+            // 2. Dibujar el botón deslizante (Knob blanco)
+            // Agregamos un borde fino gris oscuro para darle volumen
+            canvas.fillCircle(posKnobX, 75, 12, TFT_WHITE);
+            canvas.drawCircle(posKnobX, 75, 12, C_RECUADRO);
+
+            // --- Textos ---
+            canvas.setTextColor(C_TEXTO);
+            if (modoMonitorActivo) {
+                canvas.drawString("Estado: ON", 90, 67, 2);
+                canvas.setTextColor(TFT_GREEN);
+                canvas.drawString("Transmitiendo por USB...", 20, 100, 2);
+            } else {
+                canvas.drawString("Estado: OFF", 90, 67, 2);
+                canvas.setTextColor(C_ESCALA);
+                canvas.drawString("Puerto USB en espera", 20, 100, 2);
+            }
+            
+            canvas.setTextColor(C_ACCENTO);
+            canvas.drawString("Presione MENU para cambiar", 20, 130, 2);
+
+            // --- Controles de Botones ---
+            // Si presionás el botón menú, invertís el estado (ON -> OFF / OFF -> ON)
+            if (digitalRead(PIN_BT_MENU) == LOW) {
+                modoMonitorActivo = !modoMonitorActivo;
+                delay(200); // Anti-rebote aumentado levemente para más seguridad
+            }
+
+            if (digitalRead(PIN_BT_BACK) == LOW) { 
+                estadoActual = MENU_RAIZ; 
+                seleccion = 4; 
+                delay(200); 
+            }
+            break;
+        }
+       
+       
         case CALIBRACION: {
             pantallaCalibracion(); // Dibuja todo
 
@@ -1611,14 +1710,14 @@ void loop() {
 
                     // 2. Capturar (MENU)
                     if (digitalRead(PIN_BT_MENU) == LOW) {
-                        //cal_medidos[cal_punto_actual] = analogRead(PIN_BT_SENSOR); //bits crudos (0-4095) directamente del ADC
-                        p_capturada_temp = getPresionConvertida(); // "Congela" el valor para el popup
-                        if (cal_punto_actual <= 7){
+                        if (cal_punto_actual < cal_cantidad_puntos){
+                            p_capturada_temp = getPresionConvertida(); // "Congela" el valor para el popup
+                            p_capturada_temp_bar = presionActual;
                             estCalib = CAL_CONFIRMAR;
                             cal_seleccion = 0; // Cursor en "Aceptar"
                             delay(300);
                         }
-                        else if (cal_punto_actual >= 8){
+                        else {
 
                             mostrarRegresionCorregida = true; // Activa la línea magenta
                             mostrarRegresion = true; // Activa la línea magenta
@@ -1632,7 +1731,7 @@ void loop() {
                     // 3. Salir al Menú (BACK)
                     if (digitalRead(PIN_BT_BACK) == LOW) {
                         estadoActual = MENU_RAIZ;
-                        seleccion = 4;
+                        seleccion = 5;
                         delay(300);
                     }
                     break;
@@ -1648,11 +1747,12 @@ void loop() {
                     // Seleccionar opción (MENU)
                     if (digitalRead(PIN_BT_MENU) == LOW) {
                         if (cal_seleccion == 0) { // ACEPTAR
+                            cal_medidos[cal_punto_actual] = p_capturada_temp_bar;
                             cal_punto_actual++;
-                            if (cal_punto_actual >= 9) {
-                      
-                                delay(1000);
-
+                            if (cal_punto_actual >= cal_cantidad_puntos) {
+                                calcularGanancia();
+                                mostrarRegresionCorregida = true;
+                                mostrarRegresion = true;
                                 estCalib = CAL_RESULTADO;
                                 cal_seleccion = 0; 
                                 delay(300);
@@ -1671,7 +1771,7 @@ void loop() {
                         cal_seleccion = 0; 
                         delay(300); */
                         estadoActual = MENU_RAIZ;
-                        seleccion = 4;
+                        seleccion = 5;
                         delay(300);
                     }
                     break;
@@ -1705,7 +1805,7 @@ void loop() {
                     if (!editando_cal) {
                         // Navegar normal del pequeño submenú
                         if (digitalRead(PIN_BT_UP) == LOW) { cal_menu_sel = max(0, cal_menu_sel - 1); delay(200); }
-                        if (digitalRead(PIN_BT_DOWN) == LOW) { cal_menu_sel = min(5, cal_menu_sel + 1); delay(200); }
+                        if (digitalRead(PIN_BT_DOWN) == LOW) { cal_menu_sel = min(6, cal_menu_sel + 1); delay(200); }
                         
                         if (digitalRead(PIN_BT_MENU) == LOW) {
                             if (cal_menu_sel == 0) offsetOn = !offsetOn; 
@@ -1713,7 +1813,8 @@ void loop() {
                             if (cal_menu_sel == 2) ganancia = !ganancia; 
                             if (cal_menu_sel == 3) editando_cal = true; 
                             if (cal_menu_sel == 4) mostrarRegresion = !mostrarRegresion; 
-                            if (cal_menu_sel == 5) estCalib = CAL_MIDIENDO;
+                            if (cal_menu_sel == 5) editando_cal = true;
+                            if (cal_menu_sel == 6) estCalib = CAL_MIDIENDO;
                             delay(200);
                         }
                         if (digitalRead(PIN_BT_BACK) == LOW) { estCalib = CAL_MIDIENDO; editando_cal = false; delay(200); }
@@ -1743,6 +1844,7 @@ void loop() {
                     else {
                         if (digitalRead(PIN_BT_BACK) == LOW) { estCalib = CAL_MIDIENDO; editando_cal = false; delay(200); }
                     }
+                    break;
                 }
                 
                 case CAL_SUBMENU:{
@@ -1794,7 +1896,7 @@ void loop() {
             canvas.drawString("Pereson, Brian Nicolas", 20, 80, 2);
             canvas.drawString("Guillen, Facundo Nicolas", 20, 110, 2);
             canvas.drawString("Version: 1.0 S3-LCD", 20, 140, 2);
-            if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 5; delay(250); }
+            if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 6; delay(250); }
             break;
         }
         
@@ -1805,7 +1907,7 @@ void loop() {
             canvas.drawString("Instrucciones de uso", 20, 50, 2);
             canvas.drawString("Presione MENU para entrar", 20, 80, 2);
             canvas.drawString("en modo edición", 20, 110, 2);
-            if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 6; delay(250); }
+            if (digitalRead(PIN_BT_BACK) == LOW) { estadoActual = MENU_RAIZ; seleccion = 7; delay(250); }
             break;
         }
     }
@@ -1813,5 +1915,3 @@ void loop() {
     canvas.pushSprite(0, 0);
 }
     
-
-
